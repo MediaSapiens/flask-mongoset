@@ -553,7 +553,8 @@ class Model(AttrDict):
     @classmethod
     def create(cls, *args, **kwargs):
         instance = cls(*args, **kwargs)
-        return instance.save_with_reload()
+        instance['_id'] = instance.save()
+        return instance
 
     @classmethod
     def get_or_create(cls, *args, **kwargs):

@@ -16,11 +16,12 @@ https://github.com/dqminh/flask-mongoobject
 """
 
 from __future__ import absolute_import
+from bson import ObjectId
 import copy
 import operator
 import trafaret as t
 
-from bson import ObjectId
+# from bson import ObjectId
 
 from flask import abort
 from flask.signals import _signals
@@ -227,8 +228,9 @@ class BaseQuery(Collection):
     def find(self, *args, **kwargs):
         spec = args and args[0]
         kwargs['as_class'] = self.document_class
-        kwargs['_lang'] = lang = kwargs.pop('_lang',
-                                            self.document_class._fallback_lang)
+
+        if '_lang' not in kwargs:
+            kwargs['_lang'] = self.document_class._fallback_lang
 
         # defines the fields that should be translated
         if self.i18n and spec:
@@ -236,7 +238,7 @@ class BaseQuery(Collection):
                 raise TypeError("The first argument must be an instance of "
                                 "dict")
 
-            spec = self._insert_lang(spec, lang)
+            spec = self._insert_lang(spec, kwargs['_lang'])
 
         return MongoCursor(self, *args, **kwargs)
 
@@ -273,6 +275,8 @@ class BaseQuery(Collection):
         return super(BaseQuery, self).remove(spec_or_id, safe, **kwargs)
 
     def get(self, id):
+        if isinstance(id, basestring):
+            id = ObjectId(id)
         return self.find_one({'_id': id}) or self.find_one({'_int_id': id})
 
     def get_or_404(self, id):
@@ -362,7 +366,7 @@ class ModelType(type):
         if 'required_fields' in dct:
             required_fields = dct.get('required_fields')
             if dct.get('structure') is not None:
-                optional = filter(lambda key: key.name not in dct['required_fields'],
+                optional = filter(lambda key: key.name not in required_fields,
                                   dct['structure'].keys)
                 optional = map(operator.attrgetter('name'), optional)
                 dct['structure'] = dct['structure'].make_optional(*optional)
@@ -517,13 +521,8 @@ class Model(AttrDict):
 
     def save(self, *args, **kwargs):
         data = self.structure and self.structure.check(self) or self
-        return self.query.save(data, *args, **kwargs)
-
-    def save_with_reload(self, *args, **kwargs):
-        """ returns self with autorefs after save
-        """
-        _id = self.save(*args, **kwargs)
-        return self.query.find_one({'_id': _id}, _lang=self._lang)
+        self['_id'] = self.query.save(data, *args, **kwargs)
+        return self
 
     def update(self, data=None, **kwargs):
         if data is None:
@@ -553,8 +552,7 @@ class Model(AttrDict):
     @classmethod
     def create(cls, *args, **kwargs):
         instance = cls(*args, **kwargs)
-        instance['_id'] = instance.save()
-        return instance
+        return instance.save()
 
     @classmethod
     def get_or_create(cls, *args, **kwargs):

@@ -524,7 +524,7 @@ class Model(AttrDict):
         self['_id'] = self.query.save(data, *args, **kwargs)
         return self
 
-    def update(self, data=None, **kwargs):
+    def update(self, data=None, with_reload=True, **kwargs):
         if data is None:
             data = {}
             update_options = set(['upsert', 'manipulate', 'safe', 'multi',
@@ -535,7 +535,16 @@ class Model(AttrDict):
         if self.i18n:
             kwargs['_lang'] = self._lang
 
-        return self.query.update({"_id": self._id}, data, **kwargs)
+        query_response = self.query.update({"_id": self._id}, data, **kwargs)
+
+        if with_reload:
+            result = self.query.find_one({'_id': self._id})
+            if self.i18n:
+                result._lang = self._lang
+            return result
+
+        else:
+            return query_response
 
     def update_with_reload(self, data=None, **kwargs):
         """ returns self with autorefs after update

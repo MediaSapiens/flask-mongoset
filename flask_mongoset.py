@@ -253,7 +253,7 @@ class BaseQuery(Collection):
                                       collection=self, signal=after_insert)
         return _id
 
-    def update(self, spec, document, **kwargs):
+    def update(self, spec, document, *args, **kwargs):
         if self.i18n:
             lang = kwargs.pop('_lang')
             for attr, value in document.items():
@@ -263,7 +263,7 @@ class BaseQuery(Collection):
                     document[attr] = {lang: value}
 
         _id = spec.get('_id')
-        result = super(BaseQuery, self).update(spec, document, **kwargs)
+        result = super(BaseQuery, self).update(spec, document, *args, **kwargs)
         signal_map[after_update].send(self.document_class.__name__, _id=_id,
                                       collection=self, signal=after_update)
         return result
@@ -519,12 +519,12 @@ class Model(AttrDict):
         return cls.query_class(database=cls.db, name=cls.__collection__,
                                document_class=cls)
 
-    def save(self, *args, **kwargs):
+    def save(self):
         data = self.structure and self.structure.check(self) or self
-        self['_id'] = self.query.save(data, *args, **kwargs)
+        self['_id'] = self.query.save(data)
         return self
 
-    def update(self, data=None, with_reload=True, *args, **kwargs):
+    def update(self, data=None, with_reload=True, **kwargs):
         if data is None:
             data = {}
             update_options = set(['upsert', 'manipulate', 'safe', 'multi',
@@ -535,8 +535,7 @@ class Model(AttrDict):
         if self.i18n:
             kwargs['_lang'] = self._lang
 
-        query_response = self.query.update({"_id": self._id}, data, *args,
-                                           **kwargs)
+        query_response = self.query.update({"_id": self._id}, data, **kwargs)
 
         if with_reload:
             result = self.query.find_one({'_id': self._id})

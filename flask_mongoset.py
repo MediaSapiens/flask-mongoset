@@ -93,7 +93,10 @@ class AttrDict(dict):
         self._setattrs(**kwargs)
 
     def __getattr__(self, attr):
-        return self._change_method('__getitem__', attr)
+        try:
+            return dict.__getattr__(self, attr)
+        except AttributeError:
+            return self._change_method('__getitem__', attr)
 
     def __setattr__(self, attr, value):
         value = self._make_attr_dict(value)
@@ -111,12 +114,12 @@ class AttrDict(dict):
             value = AttrDict(value)
         return value
 
-    def _change_method(self, method, *args, **kwargs):
+    def _change_method(self, method, attr):
         """ Changes base dict methods to implemet dot notation
             and sets AttributeError instead KeyError
         """
         try:
-            callmethod = operator.methodcaller(method, *args, **kwargs)
+            callmethod = operator.methodcaller(method, attr)
             return callmethod(super(AttrDict, self))
         except KeyError as ex:
             raise AttributeError(ex)
@@ -225,22 +228,19 @@ class BaseQuery(Collection):
         self.i18n = getattr(self.document_class, 'i18n', None)
         super(BaseQuery, self).__init__(*args, **kwargs)
 
-    def find(self, *args, **kwargs):
-        spec = args and args[0]
+    def find(self, spec=None, *args, **kwargs):
         kwargs['as_class'] = self.document_class
 
-        if '_lang' not in kwargs:
-            kwargs['_lang'] = self.document_class._fallback_lang
+        lang = kwargs.pop('_lang', self.document_class._fallback_lang)
 
         # defines the fields that should be translated
         if self.i18n and spec:
             if not isinstance(spec, dict):
                 raise TypeError("The first argument must be an instance of "
                                 "dict")
+            spec = self._insert_lang(spec, lang)
 
-            spec = self._insert_lang(spec, kwargs['_lang'])
-
-        return MongoCursor(self, *args, **kwargs)
+        return super(BaseQuery, self).find(spec, *args, **kwargs)
 
     def insert(self, doc_or_docs, manipulate=True,
                safe=None, check_keys=True, continue_on_error=False, **kwargs):
@@ -255,7 +255,7 @@ class BaseQuery(Collection):
 
     def update(self, spec, document, *args, **kwargs):
         if self.i18n:
-            lang = kwargs.pop('_lang')
+            lang = kwargs.pop('_lang', self.document_class._fallback_lang)
             for attr, value in document.items():
                 if attr.startswith('$'):
                     document[attr] = self._insert_lang(value, lang)
@@ -495,7 +495,11 @@ class Model(AttrDict):
 
     def __setattr__(self, attr, value):
         if attr in self._protected_field_names:
-            return dict.__setattr__(self, attr, value)
+            try:
+                return dict.__setattr__(self, attr, value)
+            except AttributeError as err:
+                print err.message, attr, value
+                raise err
 
         if attr in self.i18n and not self.from_db:
             if attr not in self:
@@ -520,27 +524,28 @@ class Model(AttrDict):
                                document_class=cls)
 
     def save(self):
-        data = self.structure and self.structure.check(self) or self
+        data = self
+        if self.structure:
+            data = self.structure.check(self)
         self['_id'] = self.query.save(data)
         return self
 
     def update(self, data=None, with_reload=True, **kwargs):
-        if data is None:
-            data = {}
-            update_options = set(['upsert', 'manipulate', 'safe', 'multi',
-                                  '_check_keys'])
-            new_attrs = list(kwargs.viewkeys() - update_options)
-            data = {'$set': dict((k, kwargs.pop(k)) for k in new_attrs)}
+        update_options = set(['upsert', 'manipulate', 'safe', 'multi',
+                              '_check_keys'])
+        attrs = list(kwargs.viewkeys() - update_options)
+        data_dict = data or {'$set': dict((k, kwargs.pop(k)) for k in attrs)}
 
-        if self.i18n:
+        if self.i18n and '_lang' not in kwargs:
             kwargs['_lang'] = self._lang
 
-        query_response = self.query.update({"_id": self._id}, data, **kwargs)
+        query_response = self.query.update({"_id": self._id}, data_dict, **kwargs)
 
         if with_reload:
-            result = self.query.find_one({'_id': self._id})
+            result = self.query.get(self._id)
             if self.i18n:
                 result._lang = self._lang
+
             return result
 
         else:
@@ -564,9 +569,8 @@ class Model(AttrDict):
         return instance.save()
 
     @classmethod
-    def get_or_create(cls, *args, **kwargs):
-        spec = copy.deepcopy(args)
-        instance = cls.query.find_one(*args, **kwargs)
+    def get_or_create(cls, spec, **kwargs):
+        instance = cls.query.find_one(spec, **kwargs)
         if not instance:
             if not spec or not isinstance(spec[0], dict):
                 raise InitDataError("first argument must be an instance of "

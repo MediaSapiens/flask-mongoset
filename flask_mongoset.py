@@ -229,7 +229,7 @@ class BaseQuery(Collection):
         super(BaseQuery, self).__init__(*args, **kwargs)
 
     def find(self, spec=None, *args, **kwargs):
-        kwargs['as_class'] = self.document_class
+#        kwargs['as_class'] = self.document_class
 
         lang = kwargs.pop('_lang', self.document_class._fallback_lang)
 

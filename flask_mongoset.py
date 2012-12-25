@@ -571,12 +571,8 @@ class Model(AttrDict):
     @classmethod
     def get_or_create(cls, spec, **kwargs):
         instance = cls.query.find_one(spec, **kwargs)
-        if not instance:
-            if not spec or not isinstance(spec[0], dict):
-                raise InitDataError("first argument must be an instance of "
-                                    "dict with init data")
-            instance = cls.create(spec[0], **kwargs)
-
+        if instance is None:
+            instance = cls.create(spec, **kwargs)
         return instance
 
     def __repr__(self):

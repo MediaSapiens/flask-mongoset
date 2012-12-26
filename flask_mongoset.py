@@ -17,7 +17,6 @@ https://github.com/dqminh/flask-mongoobject
 
 from __future__ import absolute_import
 from bson import ObjectId
-import copy
 import operator
 import trafaret as t
 
@@ -194,10 +193,12 @@ class MongoCursor(Cursor):
     A cursor that will return an instance of :param as_class: with
     provided :param _lang: instead of dict
     """
-    def __init__(self, *args, **kwargs):
+    def __init__(self, collection, *args, **kwargs):
         self._lang = kwargs.pop('_lang')
         self.as_class = kwargs.pop('as_class')
-        super(MongoCursor, self).__init__(*args, **kwargs)
+        print 'args: ', args, kwargs
+        print list(Cursor(collection, *args, **kwargs))
+        super(MongoCursor, self).__init__(collection, *args, **kwargs)
 
     def next(self):
         data = super(MongoCursor, self).next()
@@ -228,19 +229,9 @@ class BaseQuery(Collection):
         self.i18n = getattr(self.document_class, 'i18n', None)
         super(BaseQuery, self).__init__(*args, **kwargs)
 
-    def find(self, spec=None, *args, **kwargs):
-#        kwargs['as_class'] = self.document_class
-
-        lang = kwargs.pop('_lang', self.document_class._fallback_lang)
-
-        # defines the fields that should be translated
-        if self.i18n and spec:
-            if not isinstance(spec, dict):
-                raise TypeError("The first argument must be an instance of "
-                                "dict")
-            spec = self._insert_lang(spec, lang)
-
-        return super(BaseQuery, self).find(spec, *args, **kwargs)
+    def find(self, *args, **kwargs):
+        return super(BaseQuery, self).find(*args, as_class=self.document_class,
+                                           **kwargs)
 
     def insert(self, doc_or_docs, manipulate=True,
                safe=None, check_keys=True, continue_on_error=False, **kwargs):
@@ -289,17 +280,17 @@ class BaseQuery(Collection):
         cursor = self.find(*args, **kwargs)
         return not cursor.count() == 0 and cursor or abort(404)
 
-    def _insert_lang(self, document, lang):
-        for attr in document.copy():
+    def _insert_lang(self, spec, lang):
+        for attr in spec.copy():
             if attr.startswith('$') and attr != '$where':
-                document[attr] = map(lambda a: self._insert_lang(a, lang),
-                                     document[attr])
+                spec[attr] = map(lambda a: self._insert_lang(a, lang),
+                                 spec[attr])
             else:
                 attrs = attr.split('.')
                 if attrs[0] in self.i18n and '$' not in attr:
                     attrs.insert(1, lang)
-                    document['.'.join(attrs)] = document.pop(attr)
-        return document
+                    spec['.'.join(attrs)] = spec.pop(attr)
+        return spec
 
     def delete(self):
         return self.drop()

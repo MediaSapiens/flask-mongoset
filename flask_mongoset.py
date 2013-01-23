@@ -196,8 +196,6 @@ class MongoCursor(Cursor):
     def __init__(self, collection, *args, **kwargs):
         self._lang = kwargs.pop('_lang')
         self.as_class = kwargs.pop('as_class')
-        print 'args: ', args, kwargs
-        print list(Cursor(collection, *args, **kwargs))
         super(MongoCursor, self).__init__(collection, *args, **kwargs)
 
     def next(self):
@@ -229,9 +227,8 @@ class BaseQuery(Collection):
         self.i18n = getattr(self.document_class, 'i18n', None)
         super(BaseQuery, self).__init__(*args, **kwargs)
 
-    def find(self, *args, **kwargs):
-        return super(BaseQuery, self).find(*args, as_class=self.document_class,
-                                           **kwargs)
+    # def find(self, *args, **kwargs):
+    #     return super(BaseQuery, self).find(*args, **kwargs)
 
     def insert(self, doc_or_docs, manipulate=True,
                safe=None, check_keys=True, continue_on_error=False, **kwargs):
@@ -489,7 +486,6 @@ class Model(AttrDict):
             try:
                 return dict.__setattr__(self, attr, value)
             except AttributeError as err:
-                print err.message, attr, value
                 raise err
 
         if attr in self.i18n and not self.from_db:

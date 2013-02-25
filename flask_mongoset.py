@@ -22,10 +22,8 @@ import trafaret as t
 
 # from bson import ObjectId
 
-from flask import abort
+from flask import abort, _request_ctx_stack
 from flask.signals import _signals
-
-from importlib import import_module
 
 from pymongo import Connection, ASCENDING
 from pymongo.cursor import Cursor
@@ -33,13 +31,14 @@ from pymongo.database import Database
 from pymongo.collection import Collection
 from pymongo.son_manipulator import (SONManipulator, AutoReference,
                                      NamespaceInjector)
+from werkzeug.utils import import_string
 
+try:
+    from flask import _app_ctx_stack
+except ImportError:
+    _app_ctx_stack = None
 
-# list of collections for models witch need autoincrement id
-inc_collections = set([])
-
-# list of collections for models witch need auto dbref
-autoref_collections = {}
+connection_stack = _app_ctx_stack or _request_ctx_stack
 
 after_insert = 'after_insert'
 after_update = 'after_update'
@@ -49,10 +48,16 @@ signal_map = {after_insert: _signals.signal('mongo_after_insert'),
               after_update: _signals.signal('mongo_after_update'),
               after_delete: _signals.signal('mongo_after_delete')}
 
-
-def resolve_class(class_path):
-    module_name, class_name = class_path.rsplit('.', 1)
-    return getattr(import_module(module_name), class_name)
+default_config = {
+    'HOST': 'localhost',
+    'PORT': 27017,
+    'USERNAME': '',
+    'PASSWORD': '',
+    'MONGODB': '',
+    'AUTOREF': False,
+    'FALLBACK_LANG': 'en',
+    'SLAVE_OKAY': False
+}
 
 
 class AuthenticationError(Exception):
@@ -128,27 +133,6 @@ class AttrDict(dict):
             setattr(self, key, value)
 
 
-class AutoincrementId(SONManipulator):
-    """ Creates objects id as integer and autoincrement it,
-        if "id" not in son object.
-        But not usefull with DBRefs, DBRefs could't be based on this "id"
-    """
-    def transform_incoming(self, son, collection):
-        if collection.name in inc_collections:
-            son["_int_id"] = son.get('_int_id',
-                                        self._get_next_id(collection))
-        return son
-
-    def _get_next_id(self, collection):
-        database = collection.database
-        result = database._autoincrement_ids.find_and_modify(
-            query={"id": collection.name},
-            update={"$inc": {"next": 1}},
-            upsert=True,
-            new=True)
-        return result["next"]
-
-
 class SavedObject(SONManipulator):
     """
     Transparently reference and de-reference already saved embedded objects.
@@ -172,8 +156,9 @@ class SavedObject(SONManipulator):
             return map(self._transform_value, value)
 
         if isinstance(value, dict):
-            if value.get('_class'):
-                cls = resolve_class(value['_class'])
+            class_name = value.pop('_class', None)
+            if class_name:
+                cls = import_string(class_name)
                 return cls(self._transform_dict(value))
             return self._transform_dict(value)
 
@@ -227,8 +212,31 @@ class BaseQuery(Collection):
         self.i18n = getattr(self.document_class, 'i18n', None)
         super(BaseQuery, self).__init__(*args, **kwargs)
 
-    # def find(self, *args, **kwargs):
-    #     return super(BaseQuery, self).find(*args, **kwargs)
+    def find(self, *args, **kwargs):
+        if not 'slave_okay' in kwargs:
+            kwargs['slave_okay'] = self.slave_okay
+        if not 'read_preference' in kwargs:
+            kwargs['read_preference'] = self.read_preference
+        if not 'tag_sets' in kwargs:
+            kwargs['tag_sets'] = self.tag_sets
+        if not 'secondary_acceptable_latency_ms' in kwargs:
+            kwargs['secondary_acceptable_latency_ms'] = (
+                self.secondary_acceptable_latency_ms)
+
+        spec = args and args[0]
+        lang = kwargs.pop('_lang', self.document_class._fallback_lang)
+        kwargs['as_class'] = self.document_class
+        kwargs['_lang'] = lang
+
+        # defines the fields that should be translated
+        if self.i18n and spec:
+            if not isinstance(spec, dict):
+                raise TypeError("The first argument must be an instance of "
+                                "dict")
+
+            spec = self._insert_lang(spec, lang)
+
+        return MongoCursor(self, *args, **kwargs)
 
     def insert(self, doc_or_docs, manipulate=True,
                safe=None, check_keys=True, continue_on_error=False, **kwargs):
@@ -611,6 +619,7 @@ class MongoSet(object):
     """
     def __init__(self, app=None):
         self.Model = Model
+        self.connection = None
 
         if app is not None:
             self.init_app(app)
@@ -618,54 +627,67 @@ class MongoSet(object):
             self.app = None
 
     def init_app(self, app):
-        app.config.setdefault('MONGODB_HOST', "localhost")
-        app.config.setdefault('MONGODB_PORT', 27017)
-        app.config.setdefault('MONGODB_USERNAME', '')
-        app.config.setdefault('MONGODB_PASSWORD', '')
-        app.config.setdefault('MONGODB_DATABASE', "")
-        app.config.setdefault('MONGODB_AUTOREF', False)
-        app.config.setdefault('MONGODB_AUTOINCREMENT', False)
-        app.config.setdefault('MONGODB_FALLBACK_LANG', 'en')
-        app.config.setdefault('MONGODB_SLAVE_OKAY', False)
         self.app = app
-        if not hasattr(app, 'extensions'):
-            app.extensions = {}
-        app.extensions['mongoset'] = self
-        self.connect()
+        self._configure(app)
 
-        @app.teardown_appcontext
+        self.connection = self._get_connection()
+
+        if not hasattr(self.app, 'extensions'):
+            self.app.extensions = {}
+        self.app.extensions['mongoset'] = _MongoSetState(self, self.app)
+
+        self.Model.db = self.session
+        self.Model._fallback_lang = app.config['MONGODB_FALLBACK_LANG']
+
+        # 0.9 and later
+        if hasattr(self.app, 'teardown_appcontext'):
+            teardown = self.app.teardown_appcontext
+        # 0.7 to 0.8
+        elif hasattr(self.app, 'teardown_request'):
+            teardown = self.app.teardown_request
+        # Older Flask versions
+        else:
+            teardown = self.app.after_request
+
+        @teardown
         def close_connection(response):
-            state = get_state(app)
+            state = get_state(self.app)
             if state.connection is not None:
                 state.connection.end_request()
             return response
 
-        self.Model.db = self.session
-        self.Model._fallback_lang = app.config.get('MONGODB_FALLBACK_LANG')
+    def _configure(self, app):
+        for key, value in default_config.items():
+            app.config.setdefault('MONGODB_{}'.format(key), value)
 
-    def connect(self):
+    def get_app(self, reference_app=None):
+        """Helper method that implements the logic to look up an application.
+        """
+        if reference_app is not None:
+            return reference_app
+        if self.app is not None:
+            return self.app
+        ctx = connection_stack.top
+        if ctx is not None:
+            return ctx.app
+        raise RuntimeError('application not registered on db '
+                           'instance and no application bound '
+                           'to current context')
+
+    def _get_connection(self):
         """Connect to the MongoDB server and register the documents from
         :attr:`registered_documents`. If you set ``MONGODB_USERNAME`` and
         ``MONGODB_PASSWORD`` then you will be authenticated at the
         ``MONGODB_DATABASE``.
         """
-        if not hasattr(self, 'app'):
-            raise RuntimeError('The mongoset extension was not init to '
-                               'the current application.  Please make sure '
-                               'to call init_app() first.')
-        if not hasattr(self, 'connection'):
-            self.connection = Connection(
-                host=self.app.config.get('MONGODB_HOST'),
-                port=self.app.config.get('MONGODB_PORT'),
-                slave_okay=self.app.config.get('MONGODB_SLAVE_OKAY', False))
+        app = self.get_app()
 
-        if self.app.config.get('MONGODB_USERNAME') is not '':
-            auth_success = self.session.authenticate(
-                self.app.config.get('MONGODB_USERNAME'),
-                self.app.config.get('MONGODB_PASSWORD'))
-            if not auth_success:
-                raise AuthenticationError("can't connect to data base,"
-                                          " wrong user_name or password")
+        self.connection = Connection(
+            host=app.config['MONGODB_HOST'],
+            port=app.config['MONGODB_PORT'],
+            slave_okay=app.config['MONGODB_SLAVE_OKAY'])
+
+        return self.connection
 
     def register(self, *models):
         """Register one or more :class:`mongoset.Model` instances to the
@@ -677,29 +699,33 @@ class MongoSet(object):
 
             model.indexes and model.query.ensure_index(model.indexes)
 
-            setattr(model, '_fallback_lang',
-                    self.app.config['MONGODB_FALLBACK_LANG'])
-
         return len(models) == 1 and models[0] or models
 
     @property
     def session(self):
         """ Returns MongoDB
         """
-        if not hasattr(self, "db"):
-            self.db = self.connection[self.app.config['MONGODB_DATABASE']]
-            # we need namespaces in any case
-            self.db.add_son_manipulator(NamespaceInjector())
+        app = self.get_app()
+        state = get_state(app)
+        db = state.connection[app.config['MONGODB_DATABASE']]
 
-            if self.app.config['MONGODB_AUTOREF']:
-                self.db.add_son_manipulator(AutoReference(self.db))
+        if app.config['MONGODB_USERNAME']:
+            auth_success = db.authenticate(
+                app.config['MONGODB_USERNAME'],
+                app.config['MONGODB_PASSWORD'])
+            if not auth_success:
+                raise AuthenticationError("can't connect to data base,"
+                                          " wrong user_name or password")
 
-            if self.app.config['MONGODB_AUTOINCREMENT']:
-                self.db.add_son_manipulator(AutoincrementId())
+        db.add_son_manipulator(NamespaceInjector())
+        db.add_son_manipulator(SavedObject())
 
-            self.db.add_son_manipulator(SavedObject())
-        return self.db
+        if app.config['MONGODB_AUTOREF']:
+            db.add_son_manipulator(AutoReference(db))
+
+        return db
 
     def clear(self):
         self.connection.drop_database(self.app.config['MONGODB_DATABASE'])
         self.connection.end_request()
+

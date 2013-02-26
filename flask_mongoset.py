@@ -379,14 +379,6 @@ class ModelType(type):
         cls._protected_field_names = list(protected_field_names.union(*names))
 
         if not cls.__abstract__:
-            # add model into DBrefs register:
-            if cls.use_autorefs:
-                autoref_collections.__setitem__(cls.__collection__, cls)
-
-            # add model into autoincrement_id register:
-            if cls.inc_id:
-                inc_collections.add(cls.__collection__)
-
             # add indexes:
             if cls.indexes:
                 for index in cls.indexes[:]:

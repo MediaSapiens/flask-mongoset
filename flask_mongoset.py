@@ -490,8 +490,10 @@ class Model(AttrDict):
 
         if attr in self.i18n and not self.from_db:
             if attr not in self:
-                if not isinstance(value, dict) or self._lang not in value:
+                if not isinstance(value, dict):
                     value = {self._lang: value}
+                elif self._lang not in value:
+                    value[self._lang] = ''
             else:
                 attrs = self[attr].copy()
                 attrs.update({self._lang: value})
